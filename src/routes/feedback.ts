@@ -1,0 +1,309 @@
+import { Router } from 'express';
+import { AppDataSource } from '../config/database';
+import { Feedback } from '../entities/Feedback';
+import { EvaluationAttempt } from '../entities/EvaluationAttempt';
+import { UserResponse } from '../entities/UserResponse';
+import { Question } from '../entities/Question';
+import { Stage } from '../entities/Stage';
+import { authMiddleware, AuthRequest } from '../middleware/auth';
+import { openRouterService } from '../services/openRouterService';
+import { User } from '../entities/User';
+
+const router = Router();
+
+// Submit evaluation attempt and generate feedback
+router.post('/attempts', authMiddleware, async (req: AuthRequest, res) => {
+  const queryRunner = AppDataSource.createQueryRunner();
+  
+  try {
+    const { attemptId, userId, stageId, responses, timeSpent } = req.body;
+    
+    // Validate required fields
+    if (!req.user?.id) {
+      return res.status(401).json({ success: false, error: 'User not authenticated' });
+    }
+    
+    // Ensure userId from payload matches authenticated user
+    if (Number(userId) !== req.user.id) {
+      return res.status(403).json({ success: false, error: 'User ID mismatch' });
+    }
+
+    console.log('Request body:', { attemptId, userId, stageId, responses, timeSpent });
+    console.log('User ID from payload:', userId);
+    console.log('User ID from token:', req.user.id);
+    console.log('Type of user ID:', typeof userId);
+
+    // Start transaction
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    // Get repositories
+    const attemptRepository = queryRunner.manager.getRepository(EvaluationAttempt);
+    const feedbackRepository = queryRunner.manager.getRepository(Feedback);
+    const responseRepository = queryRunner.manager.getRepository(UserResponse);
+    const questionRepository = queryRunner.manager.getRepository(Question);
+    const stageRepository = queryRunner.manager.getRepository(Stage);
+    const userRepository = queryRunner.manager.getRepository(User);
+
+    // Verify user exists
+    const user = await userRepository.findOne({ where: { id: Number(userId) } });
+    if (!user) {
+      await queryRunner.rollbackTransaction();
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    // Verify stage exists
+    const stage = await stageRepository.findOne({ where: { id: Number(stageId) } });
+    if (!stage) {
+      await queryRunner.rollbackTransaction();
+      return res.status(404).json({ success: false, error: 'Stage not found' });
+    }
+
+    // Get all question details at once for better performance
+    const questionIds = responses.map((r: any) => Number(r.questionId));
+    const questions = await questionRepository
+      .createQueryBuilder('question')
+      .where('question.id IN (:...ids)', { ids: questionIds })
+      .getMany();
+
+    if (questions.length === 0) {
+      await queryRunner.rollbackTransaction();
+      return res.status(400).json({ success: false, error: 'No valid questions found' });
+    }
+
+    // Create a map for quick lookup
+    const questionMap = new Map(questions.map(q => [q.id, q]));
+
+    // Validate question IDs
+    for (const response of responses) {
+      const questionId = Number(response.questionId);
+      if (!questionId || isNaN(questionId) || !questionMap.has(questionId)) {
+        await queryRunner.rollbackTransaction();
+        return res.status(400).json({ success: false, error: `Invalid question ID: ${response.questionId}` });
+      }
+    }
+
+    // Create new attempt
+    console.log('Creating attempt with:', {
+      attemptId,
+      userId,
+      stageId,
+      startTime: new Date(Date.now() - (timeSpent * 1000)),
+      endTime: new Date(),
+      timeSpentSeconds: timeSpent,
+      isCompleted: true,
+      score: 0
+    });
+
+    const attempt = attemptRepository.create({
+      attemptId,
+      user,
+      stage,
+      startTime: new Date(Date.now() - (timeSpent * 1000)),
+      endTime: new Date(),
+      timeSpentSeconds: timeSpent,
+      isCompleted: true,
+      score: 0
+    });
+    console.log('Attempt before save:', attempt);
+
+    // Save attempt with error handling
+    const savedAttempt = await attemptRepository.save(attempt).catch(err => {
+      console.error('Failed to save attempt:', err);
+      throw new Error(`Failed to save evaluation attempt: ${err.message}`);
+    });
+    console.log('Saved attempt:', savedAttempt);
+
+    // Verify attempt was saved
+    if (!savedAttempt.id) {
+      await queryRunner.rollbackTransaction();
+      return res.status(500).json({ success: false, error: 'Failed to save evaluation attempt' });
+    }
+
+    // Process responses
+    const savedResponses = [];
+    let correctCount = 0;
+    let totalScore = 0;
+    const userResponsesWithDetails = [];
+
+    for (const response of responses) {
+      const question = questionMap.get(Number(response.questionId));
+      if (!question) continue;
+
+      // For multiple choice, check if answer is correct
+      let isCorrect = false;
+      if (question.type === 'multiple-choice') {
+        isCorrect = question.correctAnswer === response.answer;
+      } else {
+        isCorrect = true; // For open questions
+      }
+
+      const pointsEarned = isCorrect ? question.points : 0;
+      if (isCorrect) correctCount++;
+      totalScore += pointsEarned;
+
+      const userResponse = responseRepository.create({
+        attempt: savedAttempt,
+        question, // Use the question entity
+        user,
+        response: response.answer,
+        isCorrect,
+        pointsEarned
+      });
+
+      const savedResponse = await responseRepository.save(userResponse).catch(err => {
+        console.error('Failed to save user response:', err);
+        throw new Error(`Failed to save user response: ${err.message}`);
+      });
+      console.log('Saved user response:', savedResponse);
+      savedResponses.push(savedResponse);
+      
+      userResponsesWithDetails.push({
+        ...savedResponse,
+        question: question.questionText,
+        correctAnswer: question.correctAnswer,
+        type: question.type
+      });
+    }
+
+    // Calculate final score
+    const finalScore = Math.round((correctCount / responses.length) * 100);
+
+    // Generate AI feedback
+    const aiFeedback = await openRouterService.getInstance().generateFeedback(
+      userResponsesWithDetails,
+      questions,
+      finalScore,
+      responses.length,
+      correctCount,
+      stage.title
+    );
+
+    // Create feedback
+    const feedback = feedbackRepository.create({
+      attempt: savedAttempt,
+      user,
+      stage,
+      score: finalScore,
+      totalQuestions: responses.length,
+      correctAnswers: correctCount,
+      strengths: aiFeedback.strengths || [],
+      improvements: aiFeedback.improvements || [],
+      nextSteps: aiFeedback.nextSteps || '',
+      detailedFeedback: aiFeedback.detailedFeedback || '',
+      badge: aiFeedback.badge || 'QA Novice'
+    });
+
+    const savedFeedback = await feedbackRepository.save(feedback).catch(err => {
+      console.error('Failed to save feedback:', err);
+      throw new Error(`Failed to save feedback: ${err.message}`);
+    });
+    console.log('Saved feedback:', savedFeedback);
+
+    // Update attempt with final score
+    savedAttempt.score = finalScore;
+    await attemptRepository.save(savedAttempt).catch(err => {
+      console.error('Failed to update attempt score:', err);
+      throw new Error(`Failed to update attempt score: ${err.message}`);
+    });
+
+    // Commit transaction
+    await queryRunner.commitTransaction();
+
+    // Prepare response
+    res.status(201).json({
+      success: true,
+      feedbackId: savedFeedback.id,
+      attemptId: savedAttempt.attemptId
+    });
+
+  } catch (error) {
+    if (queryRunner.isTransactionActive) {
+      await queryRunner.rollbackTransaction();
+    }
+    console.error('Error submitting evaluation:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to submit evaluation',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    });
+  } finally {
+    await queryRunner.release();
+  }
+});
+
+// Get feedback by ID
+router.get('/:id', authMiddleware, async (req: AuthRequest, res) => {
+  try {
+    const feedbackId = parseInt(req.params.id);
+    const feedbackRepository = AppDataSource.getRepository(Feedback);
+    
+    const feedback = await feedbackRepository.findOne({
+      where: { 
+        id: feedbackId,
+        userId: req.user!.id // Ensure the feedback belongs to the authenticated user
+      },
+      relations: ['attempt', 'stage']
+    });
+
+    if (!feedback) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Feedback not found' 
+      });
+    }
+
+    res.json({
+      success: true,
+      data: feedback
+    });
+  } catch (error) {
+    console.error('Error fetching feedback:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch feedback',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+// Get feedback for an attempt
+router.get('/attempts/:attemptId', authMiddleware, async (req: AuthRequest, res) => {
+  try {
+    const attemptId = parseInt(req.params.attemptId);
+    const feedbackRepository = AppDataSource.getRepository(Feedback);
+    
+    const feedback = await feedbackRepository.findOne({
+      where: { attemptId, userId: req.user!.id },
+      relations: ['attempt', 'stage']
+    });
+
+    if (!feedback) {
+      return res.status(404).json({ error: 'Feedback not found' });
+    }
+
+    res.json({ feedback });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch feedback' });
+  }
+});
+
+// Get user's feedback for a stage
+router.get('/stages/:stageId', authMiddleware, async (req: AuthRequest, res) => {
+  try {
+    const stageId = parseInt(req.params.stageId);
+    const feedbackRepository = AppDataSource.getRepository(Feedback);
+    
+    const feedbacks = await feedbackRepository.find({
+      where: { stageId, userId: req.user!.id },
+      relations: ['attempt'],
+      order: { createdAt: 'DESC' }
+    });
+
+    res.json({ feedbacks });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch stage feedback' });
+  }
+});
+
+export default router;
