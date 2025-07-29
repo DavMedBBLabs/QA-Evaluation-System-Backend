@@ -9,10 +9,10 @@ export class UserStage {
   id: number = 0;
 
   @Column({ name: 'user_id', type: 'integer' })
-  userId: number = 0;
+  userId: number;
 
   @Column({ name: 'stage_id', type: 'integer' })
-  stageId: number = 0;
+  stageId: number;
 
   @Column({ name: 'is_completed', type: 'boolean', default: false })
   isCompleted: boolean = false;
@@ -25,9 +25,9 @@ export class UserStage {
 
   @ManyToOne(() => User, user => user.userStages)
   @JoinColumn({ name: 'user_id' })
-  user: User = new User();
+  user: User;
 
   @ManyToOne(() => Stage, stage => stage.userStages)
   @JoinColumn({ name: 'stage_id' })
-  stage: Stage = new Stage();
+  stage: Stage;
 }

@@ -12,7 +12,15 @@ export interface ICreateStageInput {
   color: string;
   estimatedTime: string;
   displayOrder: number;
-  isActive?: boolean;
+  isActive: boolean;
+  considerations?: string | null;
+  topicsCovered?: string[] | null;
+  whatToExpect?: string | null;
+  tipsForSuccess?: string[] | null;
+  evaluationDescription?: string | null;
+  totalQuestions?: number;
+  openQuestions?: number;
+  closedQuestions?: number;
 }
 
 @Entity('stages')
@@ -47,6 +55,30 @@ export class Stage {
   @Column({ name: 'display_order', type: 'integer' })
   displayOrder: number = 0;
 
+  @Column({ type: 'text', nullable: true })
+  considerations: string | null = null;
+
+  @Column({ type: 'text', array: true, nullable: true })
+  topicsCovered: string[] | null = null;
+
+  @Column({ type: 'text', nullable: true })
+  whatToExpect: string | null = null;
+
+  @Column({ type: 'text', array: true, nullable: true })
+  tipsForSuccess: string[] | null = null;
+
+  @Column({ type: 'text', nullable: true })
+  evaluationDescription: string | null = null;
+
+  @Column({ name: 'total_questions', type: 'integer', default: 10 })
+  totalQuestions: number = 10;
+
+  @Column({ name: 'open_questions', type: 'integer', default: 5 })
+  openQuestions: number = 5;
+
+  @Column({ name: 'closed_questions', type: 'integer', default: 5 })
+  closedQuestions: number = 5;
+
   @OneToMany(() => Question, question => question.stage)
   questions: Question[];
 
@@ -79,8 +111,16 @@ export class Stage {
     stage.color = stageData.color;
     stage.estimatedTime = stageData.estimatedTime;
     stage.displayOrder = stageData.displayOrder;
-    stage.isActive = stageData.isActive ?? true;
+    stage.isActive = stageData.isActive;
     stage.questionCount = 0; // Initialize with 0 questions
+    stage.considerations = stageData.considerations || null;
+    stage.topicsCovered = stageData.topicsCovered || null;
+    stage.whatToExpect = stageData.whatToExpect || null;
+    stage.tipsForSuccess = stageData.tipsForSuccess || null;
+    stage.evaluationDescription = stageData.evaluationDescription || null;
+    stage.totalQuestions = stageData.totalQuestions || 10;
+    stage.openQuestions = stageData.openQuestions || 5;
+    stage.closedQuestions = stageData.closedQuestions || 5;
 
     try {
       await stageRepository.save(stage);

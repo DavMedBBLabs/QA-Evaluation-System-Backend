@@ -5,6 +5,7 @@ import { EvaluationAttempt } from '../entities/EvaluationAttempt';
 import { UserResponse } from '../entities/UserResponse';
 import { Question } from '../entities/Question';
 import { Stage } from '../entities/Stage';
+import { UserStage } from '../entities/UserStage';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { openRouterService } from '../services/openRouterService';
 import { User } from '../entities/User';
@@ -32,6 +33,17 @@ router.post('/attempts', authMiddleware, async (req: AuthRequest, res) => {
     console.log('User ID from payload:', userId);
     console.log('User ID from token:', req.user.id);
     console.log('Type of user ID:', typeof userId);
+    console.log('Stage ID from payload:', stageId);
+    console.log('Type of stage ID:', typeof stageId);
+    
+    // Validate that userId and stageId are valid numbers
+    if (!userId || isNaN(Number(userId)) || Number(userId) <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid user ID' });
+    }
+    
+    if (!stageId || isNaN(Number(stageId)) || Number(stageId) <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid stage ID' });
+    }
 
     // Start transaction
     await queryRunner.connect();
@@ -59,12 +71,42 @@ router.post('/attempts', authMiddleware, async (req: AuthRequest, res) => {
       return res.status(404).json({ success: false, error: 'Stage not found' });
     }
 
+    // Check if stage has questions first
+    const stageQuestions = await questionRepository.find({ where: { stageId } });
+    console.log(`Stage ${stageId} has ${stageQuestions.length} questions available`);
+    
+    if (stageQuestions.length === 0) {
+      await queryRunner.rollbackTransaction();
+      return res.status(400).json({ 
+        success: false, 
+        error: `No questions available for stage ${stageId}. Please generate questions first.` 
+      });
+    }
+    
     // Get all question details at once for better performance
     const questionIds = responses.map((r: any) => Number(r.questionId));
+    
+    console.log('Processing feedback with:', {
+      stageId,
+      responsesCount: responses.length,
+      questionIds,
+      validQuestionIds: questionIds.filter((id: number) => id && !isNaN(id)),
+      availableQuestionIds: stageQuestions.map(q => q.id)
+    });
+    
+    // Validate that we have question IDs
+    if (!questionIds.length || questionIds.every((id: number) => !id || isNaN(id))) {
+      console.error('No valid question IDs provided:', { questionIds, responses });
+      await queryRunner.rollbackTransaction();
+      return res.status(400).json({ success: false, error: 'No valid question IDs provided' });
+    }
+    
     const questions = await questionRepository
       .createQueryBuilder('question')
       .where('question.id IN (:...ids)', { ids: questionIds })
       .getMany();
+    
+    console.log('Found questions:', questions.length);
 
     if (questions.length === 0) {
       await queryRunner.rollbackTransaction();
@@ -133,9 +175,34 @@ router.post('/attempts', authMiddleware, async (req: AuthRequest, res) => {
       // For multiple choice, check if answer is correct
       let isCorrect = false;
       if (question.type === 'multiple-choice') {
-        isCorrect = question.correctAnswer === response.answer;
+        // Convert user answer (index) to the actual option text
+        const userAnswerIndex = parseInt(response.answer);
+        const userSelectedOption = question.options?.[userAnswerIndex];
+        
+        // Compare with the correct answer
+        isCorrect = question.correctAnswer === userSelectedOption;
+        
+        console.log(`Multiple choice evaluation for question ${question.id}:`);
+        console.log(`  User answer index: ${response.answer}`);
+        console.log(`  User selected option: ${userSelectedOption}`);
+        console.log(`  Correct answer: ${question.correctAnswer}`);
+        console.log(`  Is correct: ${isCorrect}`);
       } else {
-        isCorrect = true; // For open questions
+        // For open questions, evaluate with AI
+        try {
+          const aiEvaluation = await openRouterService.getInstance().evaluateOpenQuestion(
+            question.questionText,
+            response.answer,
+            question.category || 'General',
+            question.difficulty || 'intermediate'
+          );
+          isCorrect = aiEvaluation.isCorrect;
+          console.log(`AI evaluation for question ${question.id}: ${isCorrect ? 'Correct' : 'Incorrect'}`);
+        } catch (error) {
+          console.error('Error evaluating open question with AI:', error);
+          // Fallback: mark as incorrect if AI evaluation fails
+          isCorrect = false;
+        }
       }
 
       const pointsEarned = isCorrect ? question.points : 0;
@@ -162,7 +229,9 @@ router.post('/attempts', authMiddleware, async (req: AuthRequest, res) => {
         ...savedResponse,
         question: question.questionText,
         correctAnswer: question.correctAnswer,
-        type: question.type
+        userSelectedOption: question.type === 'multiple-choice' ? question.options?.[parseInt(response.answer)] : null,
+        type: question.type,
+        options: question.options
       });
     }
 
@@ -206,6 +275,98 @@ router.post('/attempts', authMiddleware, async (req: AuthRequest, res) => {
       console.error('Failed to update attempt score:', err);
       throw new Error(`Failed to update attempt score: ${err.message}`);
     });
+
+    // Update user stage progress
+    const userStageRepository = queryRunner.manager.getRepository(UserStage);
+    
+    console.log('About to update user stage progress with:', {
+      userId: Number(userId),
+      stageId: Number(stageId),
+      finalScore,
+      isCompleted: finalScore >= 60
+    });
+    
+    // Check if user has already completed this stage
+    let userStage = await userStageRepository.findOne({
+      where: { userId: Number(userId), stageId: Number(stageId) }
+    });
+
+    if (!userStage) {
+      // Create new user stage record
+      const userIdNum = Number(userId);
+      const stageIdNum = Number(stageId);
+      
+      console.log('Creating new user stage with:', {
+        userId: userIdNum,
+        stageId: stageIdNum,
+        isCompleted: finalScore >= 60,
+        score: finalScore,
+        completedAt: finalScore >= 60 ? new Date() : null
+      });
+      
+      userStage = userStageRepository.create({
+        userId: userIdNum,
+        stageId: stageIdNum,
+        isCompleted: finalScore >= 60, // Mark as completed if score >= 60%
+        score: finalScore,
+        completedAt: finalScore >= 60 ? new Date() : null
+      });
+    } else {
+      // Update existing record if new score is better
+      if (finalScore >= 60 && !userStage.isCompleted) {
+        userStage.isCompleted = true;
+        userStage.completedAt = new Date();
+      }
+      if (finalScore > (userStage.score || 0)) {
+        userStage.score = finalScore;
+      }
+    }
+
+    await userStageRepository.save(userStage).catch(err => {
+      console.error('Failed to update user stage progress:', err);
+      throw new Error(`Failed to update user stage progress: ${err.message}`);
+    });
+
+    console.log('Updated user stage progress:', {
+      userId: Number(userId),
+      stageId: Number(stageId),
+      isCompleted: userStage.isCompleted,
+      score: userStage.score,
+      completedAt: userStage.completedAt
+    });
+
+    // Update user's global score and current stage
+    const userRepo = queryRunner.manager.getRepository(User);
+    const currentUser = await userRepo.findOne({ where: { id: Number(userId) } });
+    
+    if (currentUser) {
+      // Update global score
+      const totalScore = await userStageRepository
+        .createQueryBuilder('userStage')
+        .select('SUM(userStage.score)', 'total')
+        .where('userStage.userId = :userId', { userId: Number(userId) })
+        .andWhere('userStage.isCompleted = :isCompleted', { isCompleted: true })
+        .getRawOne();
+      
+      currentUser.globalScore = totalScore?.total || 0;
+      
+      // Update current stage to next stage if completed
+      if (userStage.isCompleted) {
+        const nextStage = await queryRunner.manager.getRepository(Stage).findOne({
+          where: { 
+            displayOrder: stage.displayOrder + 1,
+            isActive: true 
+          }
+        });
+        
+        if (nextStage) {
+          currentUser.currentStageId = nextStage.id;
+        }
+      }
+      
+      await userRepo.save(currentUser);
+      console.log('Updated user global score:', currentUser.globalScore);
+    }
 
     // Commit transaction
     await queryRunner.commitTransaction();

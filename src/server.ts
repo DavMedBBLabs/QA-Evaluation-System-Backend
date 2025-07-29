@@ -16,6 +16,7 @@ import stageRoutes from './routes/stages';
 import questionRoutes from './routes/questions';
 import evaluationRoutes from './routes/evaluations';
 import feedbackRoutes from './routes/feedback';
+import skillsRoutes from './routes/skills';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -45,6 +46,7 @@ app.use('/api/stages', stageRoutes);
 app.use('/api/questions', questionRoutes);
 app.use('/api/evaluations', evaluationRoutes);
 app.use('/api/feedback', feedbackRoutes);
+app.use('/api/skills', skillsRoutes);
 
 // Health check
 app.get('/health', (req, res) => {

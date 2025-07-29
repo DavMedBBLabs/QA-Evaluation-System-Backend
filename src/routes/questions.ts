@@ -22,12 +22,13 @@ router.get('/generate', authMiddleware, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: 'Stage not found' });
     }
 
-    // Generate questions using AI
+    // Generate questions using AI with considerations
     const aiResponse = await openRouterService.getInstance().generateQuestions(
       stageEntity.title,
       stageEntity.difficulty,
       openQuestions,
-      closedQuestions
+      closedQuestions,
+      stageEntity.considerations || undefined // Pass considerations to AI
     );
 
     // Save generated questions to database

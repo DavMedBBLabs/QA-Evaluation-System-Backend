@@ -64,7 +64,27 @@ router.get('/generate', authMiddleware, async (req: AuthRequest, res) => {
     res.json({ questions: questionsForClient });
   } catch (error) {
     console.error('Error generating questions:', error);
-    res.status(500).json({ error: 'Failed to generate questions' });
+    
+    // Provide more specific error messages based on the error type
+    if (error instanceof Error) {
+      if (error.message.includes('timeout') || error.message.includes('ETIMEDOUT')) {
+        return res.status(408).json({ 
+          error: 'Request timeout',
+          message: 'La generación de preguntas está tomando más tiempo del esperado. Por favor, intenta de nuevo en unos momentos.'
+        });
+      }
+      if (error.message.includes('ENOTFOUND') || error.message.includes('ECONNREFUSED')) {
+        return res.status(503).json({ 
+          error: 'Service unavailable',
+          message: 'El servicio de IA no está disponible en este momento. Por favor, intenta de nuevo más tarde.'
+        });
+      }
+    }
+    
+    res.status(500).json({ 
+      error: 'Internal server error',
+      message: 'Error interno del servidor al generar preguntas. Por favor, intenta de nuevo más tarde.'
+    });
   }
 });
 
