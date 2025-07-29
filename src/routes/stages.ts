@@ -358,7 +358,14 @@ router.get('/debug/unlocking', authMiddleware, async (req: AuthRequest, res) => 
         displayOrder: stage.displayOrder,
         isCompleted: userStage?.isCompleted || false,
         isUnlocked,
-        userScore: userStage?.score || null
+        userScore: userStage?.score || null,
+        completedAt: userStage?.completedAt || null,
+        userStageData: userStage ? {
+          stageId: userStage.stageId,
+          isCompleted: userStage.isCompleted,
+          score: userStage.score,
+          completedAt: userStage.completedAt
+        } : null
       };
     });
 
@@ -366,10 +373,43 @@ router.get('/debug/unlocking', authMiddleware, async (req: AuthRequest, res) => 
       userId: req.user!.id,
       totalStages: stages.length,
       completedStages: userStages.filter(us => us.isCompleted).map(us => us.stageId),
+      allUserStages: userStages.map(us => ({
+        stageId: us.stageId,
+        isCompleted: us.isCompleted,
+        score: us.score,
+        completedAt: us.completedAt
+      })),
       stages: debugInfo
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch debug info' });
+  }
+});
+
+// Temporary debug endpoint for stage 16
+router.get('/debug/stage16', authMiddleware, async (req: AuthRequest, res) => {
+  try {
+    const stageRepository = AppDataSource.getRepository(Stage);
+    const userStageRepository = AppDataSource.getRepository(UserStage);
+
+    const stage16 = await stageRepository.findOne({
+      where: { id: 16 }
+    });
+
+    const userStage16 = await userStageRepository.findOne({
+      where: { userId: req.user!.id, stageId: 16 }
+    });
+
+    res.json({
+      stage: stage16,
+      userStage: userStage16,
+      userId: req.user!.id,
+      isCompleted: userStage16?.isCompleted || false,
+      score: userStage16?.score || null,
+      completedAt: userStage16?.completedAt || null
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch stage 16 debug info' });
   }
 });
 

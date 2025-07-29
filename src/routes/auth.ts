@@ -87,8 +87,23 @@ router.post('/login', async (req, res, next) => {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 
+    // Verificar conexión a la base de datos antes de proceder
+    if (!AppDataSource.isInitialized) {
+      return res.status(503).json({ 
+        error: 'Service temporarily unavailable',
+        message: 'Database connection is not ready. Please try again in a moment.'
+      });
+    }
+
     const userRepository = AppDataSource.getRepository(User);
-    const user = await userRepository.findOne({ where: { email } });
+    
+    // Agregar timeout para la consulta de base de datos
+    const user = await Promise.race([
+      userRepository.findOne({ where: { email } }),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Database query timeout')), 10000)
+      )
+    ]);
 
     if (!user) {
       return res.status(401).json({ error: 'Invalid credentials' });
@@ -120,7 +135,28 @@ router.post('/login', async (req, res, next) => {
         currentStageId: user.currentStageId,
       },
     });
-  } catch (error) {
+  } catch (error: any) {
+    // Manejar errores específicos de base de datos
+    if (error.code === 'ETIMEDOUT' || error.code === 'ECONNREFUSED' || error.message === 'Database query timeout') {
+      console.error('Database connection error during login:', error);
+      return res.status(503).json({ 
+        error: 'Service temporarily unavailable',
+        message: 'Unable to connect to the database. Please try again in a moment.',
+        retryAfter: 30 // segundos
+      });
+    }
+    
+    // Otros errores de base de datos
+    if (error.code && error.code.startsWith('PGSQL')) {
+      console.error('PostgreSQL error during login:', error);
+      return res.status(503).json({ 
+        error: 'Database error',
+        message: 'A database error occurred. Please try again.',
+        retryAfter: 10
+      });
+    }
+    
+    console.error('Login error:', error);
     next(error);
   }
 });
