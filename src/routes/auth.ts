@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt, { SignOptions } from 'jsonwebtoken';
-import { AppDataSource } from '../config/database';
+import { AppDataSource } from '../config/database-minimal';
 import { User } from '../entities/User';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 
@@ -27,7 +27,7 @@ router.post('/register', async (req, res, next) => {
     const userRepository = AppDataSource.getRepository(User);
     
     // Check if user exists
-    const existingUser = await userRepository.findOne({ where: { email } });
+    const existingUser: User | null = await userRepository.findOne({ where: { email } });
     if (existingUser) {
       return res.status(400).json({ error: 'User already exists' });
     }
@@ -72,7 +72,7 @@ router.post('/register', async (req, res, next) => {
         currentStageId: user.currentStageId,
       },
     });
-    console.log('User created successfully', user, token, res);
+
   } catch (error) {
     next(error);
   }
@@ -98,9 +98,9 @@ router.post('/login', async (req, res, next) => {
     const userRepository = AppDataSource.getRepository(User);
     
     // Agregar timeout para la consulta de base de datos
-    const user = await Promise.race([
+    const user: User | null = await Promise.race([
       userRepository.findOne({ where: { email } }),
-      new Promise((_, reject) => 
+      new Promise<never>((_, reject) => 
         setTimeout(() => reject(new Error('Database query timeout')), 10000)
       )
     ]);

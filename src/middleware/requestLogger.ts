@@ -13,27 +13,18 @@ export const requestLogger = (req: Request, res: Response, next: NextFunction) =
   }
 
   const start = Date.now();
-  const { method, originalUrl, ip } = req;
+  const { method, originalUrl } = req;
   
-  // Log the incoming request
-  console.log(`[${getCurrentTime()}] ${method} ${originalUrl} from ${ip}`);
-  
-  // Log request headers in development
+
+  // Log the response when it's finished (only in development)
   if (process.env.NODE_ENV === 'development') {
-    console.log('Headers:', {
-      'user-agent': req.headers['user-agent'],
-      'content-type': req.headers['content-type'],
-      authorization: req.headers.authorization ? '***' : 'none',
+    res.on('finish', () => {
+      const duration = Date.now() - start;
+      console.log(
+        `[${getCurrentTime()}] ${method} ${originalUrl} - ${res.statusCode} ${res.statusMessage} (${duration}ms)`
+      );
     });
   }
-
-  // Log the response when it's finished
-  res.on('finish', () => {
-    const duration = Date.now() - start;
-    console.log(
-      `[${getCurrentTime()}] ${method} ${originalUrl} - ${res.statusCode} ${res.statusMessage} (${duration}ms)`
-    );
-  });
 
   next();
 };

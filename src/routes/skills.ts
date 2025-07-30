@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { AppDataSource } from '../config/database';
+import { AppDataSource } from '../config/database-minimal';
 import { EvaluationAttempt } from '../entities/EvaluationAttempt';
 import { Stage } from '../entities/Stage';
 import { User } from '../entities/User';
@@ -8,6 +8,10 @@ import { openRouterService } from '../services/openRouterService';
 import { AuthRequest } from '../middleware/auth';
 
 const router = Router();
+
+// Cache para AI feedback (5 minutos)
+const aiFeedbackCache = new Map<string, { feedback: any; timestamp: number }>();
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutos
 
 // Get skills analytics with filters
 router.get('/analytics', authMiddleware, async (req: AuthRequest, res) => {
@@ -22,20 +26,15 @@ router.get('/analytics', authMiddleware, async (req: AuthRequest, res) => {
     const attemptRepository = AppDataSource.getRepository(EvaluationAttempt);
     const stageRepository = AppDataSource.getRepository(Stage);
 
-    // Get attempts with filters
+    // Optimización 1: Aplicar filtros directamente en la consulta SQL
     let whereClause: any = { userId };
+    let dateFilter = '';
+    
     if (stageId) {
       whereClause.stageId = parseInt(stageId as string);
     }
 
-    const attempts = await attemptRepository.find({
-      where: whereClause,
-      relations: ['stage'],
-      order: { createdAt: 'DESC' }
-    });
-
-    // Filter by date if needed
-    let filteredAttempts = attempts;
+    // Optimización 2: Aplicar filtro de fecha en SQL en lugar de JavaScript
     if (timeFilter !== 'all') {
       const filterDate = new Date();
       switch (timeFilter) {
@@ -52,15 +51,52 @@ router.get('/analytics', authMiddleware, async (req: AuthRequest, res) => {
           filterDate.setFullYear(filterDate.getFullYear() - 1);
           break;
       }
-      filteredAttempts = attempts.filter(attempt => 
-        new Date(attempt.createdAt) >= filterDate
-      );
+      whereClause.createdAt = { $gte: filterDate };
     }
 
-    // Calculate stage metrics
+    // Optimización 3: Usar QueryBuilder para mejor rendimiento
+    const queryBuilder = attemptRepository
+      .createQueryBuilder('attempt')
+      .leftJoinAndSelect('attempt.stage', 'stage')
+      .where('attempt.userId = :userId', { userId });
+
+    if (stageId) {
+      queryBuilder.andWhere('attempt.stageId = :stageId', { stageId: parseInt(stageId as string) });
+    }
+
+    if (timeFilter !== 'all') {
+      const filterDate = new Date();
+      switch (timeFilter) {
+        case 'today':
+          filterDate.setHours(0, 0, 0, 0);
+          break;
+        case 'week':
+          filterDate.setDate(filterDate.getDate() - 7);
+          break;
+        case 'month':
+          filterDate.setMonth(filterDate.getMonth() - 1);
+          break;
+        case 'year':
+          filterDate.setFullYear(filterDate.getFullYear() - 1);
+          break;
+      }
+      queryBuilder.andWhere('attempt.createdAt >= :filterDate', { filterDate });
+    }
+
+    queryBuilder.orderBy('attempt.createdAt', 'DESC');
+
+    const attempts = await queryBuilder.getMany();
+
+    // Optimización 4: Calcular métricas de manera más eficiente
     const stageMetricsMap = new Map();
-    for (const attempt of filteredAttempts) {
+    let totalScore = 0;
+    let totalTimeSpent = 0;
+    let completedAttempts = 0;
+    const passedStages = new Set<number>();
+
+    for (const attempt of attempts) {
       const stageId = attempt.stageId;
+      
       if (!stageMetricsMap.has(stageId)) {
         stageMetricsMap.set(stageId, {
           stageId,
@@ -76,14 +112,26 @@ router.get('/analytics', authMiddleware, async (req: AuthRequest, res) => {
 
       const metrics = stageMetricsMap.get(stageId);
       metrics.totalAttempts++;
+      
       if (attempt.score !== null) {
         metrics.scores.push(attempt.score);
         metrics.bestScore = Math.max(metrics.bestScore, attempt.score);
+        totalScore += attempt.score;
       }
+      
       if (attempt.timeSpentSeconds !== null) {
         metrics.totalTimeSpent += attempt.timeSpentSeconds;
+        totalTimeSpent += attempt.timeSpentSeconds;
       }
-      if (attempt.isCompleted) metrics.completedAttempts++;
+      
+      if (attempt.isCompleted) {
+        metrics.completedAttempts++;
+        completedAttempts++;
+        
+        if (attempt.score !== null && attempt.score >= 70) {
+          passedStages.add(stageId);
+        }
+      }
       
       const attemptDate = new Date(attempt.createdAt);
       if (!metrics.lastAttemptDate || attemptDate > new Date(metrics.lastAttemptDate)) {
@@ -104,29 +152,26 @@ router.get('/analytics', authMiddleware, async (req: AuthRequest, res) => {
       lastAttemptDate: metrics.lastAttemptDate
     }));
 
-    // Calculate overall metrics
-    const totalAttempts = filteredAttempts.length;
-    const averageScore = totalAttempts > 0 ? 
-      filteredAttempts.reduce((sum, attempt) => sum + (attempt.score || 0), 0) / totalAttempts : 0;
-    const totalTimeSpent = filteredAttempts.reduce((sum, attempt) => sum + (attempt.timeSpentSeconds || 0), 0);
+    // Optimización 5: Calcular métricas generales de manera más eficiente
+    const totalAttempts = attempts.length;
+    const averageScore = totalAttempts > 0 ? totalScore / totalAttempts : 0;
     
-    // Get all stages and completed stages
-    const allStages = await stageRepository.find({ where: { isActive: true } });
-    const passedStages = new Set(
-      filteredAttempts
-        .filter(attempt => attempt.isCompleted && (attempt.score || 0) >= 70) // Score >= 70% (already in percentage)
-        .map(attempt => attempt.stageId)
-    );
+    // Optimización 6: Obtener stages de manera más eficiente
+    const allStages = await stageRepository.find({ 
+      where: { isActive: true },
+      select: ['id', 'title'] // Solo seleccionar campos necesarios
+    });
 
-    // Calculate improvement rate (simplified - could be more sophisticated)
-    const sortedAttempts = [...filteredAttempts].sort((a: EvaluationAttempt, b: EvaluationAttempt) => 
-      new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-    );
-    
+    // Optimización 7: Calcular improvement rate de manera más eficiente
     let improvementRate = 0;
-    if (sortedAttempts.length >= 2) {
-      const firstHalf = sortedAttempts.slice(0, Math.floor(sortedAttempts.length / 2));
-      const secondHalf = sortedAttempts.slice(Math.floor(sortedAttempts.length / 2));
+    if (attempts.length >= 2) {
+      const sortedAttempts = attempts.sort((a, b) => 
+        new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+      );
+      
+      const midPoint = Math.floor(sortedAttempts.length / 2);
+      const firstHalf = sortedAttempts.slice(0, midPoint);
+      const secondHalf = sortedAttempts.slice(midPoint);
       
       const firstAvg = firstHalf.reduce((sum, attempt) => sum + (attempt.score || 0), 0) / firstHalf.length;
       const secondAvg = secondHalf.reduce((sum, attempt) => sum + (attempt.score || 0), 0) / secondHalf.length;
@@ -143,13 +188,21 @@ router.get('/analytics', authMiddleware, async (req: AuthRequest, res) => {
       improvementRate
     };
 
-    // Generate AI feedback
-    const aiFeedback = await generateAIFeedback(filteredAttempts, stageMetrics, overallMetrics);
+    // Optimización 8: Cache para AI feedback
+    const cacheKey = `${userId}-${timeFilter}-${stageId || 'all'}`;
+    const cachedFeedback = aiFeedbackCache.get(cacheKey);
     
-    console.log('Debug AI Feedback:', aiFeedback);
+    let aiFeedback;
+    if (cachedFeedback && (Date.now() - cachedFeedback.timestamp) < CACHE_TTL) {
+      aiFeedback = cachedFeedback.feedback;
+    } else {
+      // Solo generar AI feedback si no hay cache válido
+      aiFeedback = await generateAIFeedback(attempts, stageMetrics, overallMetrics);
+      aiFeedbackCache.set(cacheKey, { feedback: aiFeedback, timestamp: Date.now() });
+    }
 
     res.json({
-      attempts: filteredAttempts.map(attempt => ({
+      attempts: attempts.map(attempt => ({
         id: attempt.id,
         stageId: attempt.stageId,
         stageDisplayOrder: attempt.stage.displayOrder,
@@ -171,7 +224,7 @@ router.get('/analytics', authMiddleware, async (req: AuthRequest, res) => {
   }
 });
 
-// Get attempts with filters
+// Get attempts with filters - OPTIMIZADO
 router.get('/attempts', authMiddleware, async (req: AuthRequest, res) => {
   try {
     const userId = req.user?.id;
@@ -183,19 +236,16 @@ router.get('/attempts', authMiddleware, async (req: AuthRequest, res) => {
 
     const attemptRepository = AppDataSource.getRepository(EvaluationAttempt);
     
-    let whereClause: any = { userId };
+    // Construir query builder optimizado
+    const queryBuilder = attemptRepository
+      .createQueryBuilder('attempt')
+      .leftJoinAndSelect('attempt.stage', 'stage')
+      .where('attempt.userId = :userId', { userId });
+
     if (stageId) {
-      whereClause.stageId = parseInt(stageId as string);
+      queryBuilder.andWhere('attempt.stageId = :stageId', { stageId: parseInt(stageId as string) });
     }
 
-    const attempts = await attemptRepository.find({
-      where: whereClause,
-      relations: ['stage'],
-      order: { createdAt: 'DESC' }
-    });
-
-    // Apply time filter
-    let filteredAttempts = attempts;
     if (timeFilter !== 'all') {
       const filterDate = new Date();
       switch (timeFilter) {
@@ -212,13 +262,15 @@ router.get('/attempts', authMiddleware, async (req: AuthRequest, res) => {
           filterDate.setFullYear(filterDate.getFullYear() - 1);
           break;
       }
-      filteredAttempts = attempts.filter(attempt => 
-        new Date(attempt.createdAt) >= filterDate
-      );
+      queryBuilder.andWhere('attempt.createdAt >= :filterDate', { filterDate });
     }
 
+    queryBuilder.orderBy('attempt.createdAt', 'DESC');
+
+    const attempts = await queryBuilder.getMany();
+
     res.json({
-      attempts: filteredAttempts.map(attempt => ({
+      attempts: attempts.map(attempt => ({
         id: attempt.id,
         stageId: attempt.stageId,
         stageTitle: attempt.stage.title,
@@ -236,7 +288,7 @@ router.get('/attempts', authMiddleware, async (req: AuthRequest, res) => {
   }
 });
 
-// Get AI feedback
+// Get AI feedback - OPTIMIZADO
 router.get('/feedback', authMiddleware, async (req: AuthRequest, res) => {
   try {
     const userId = req.user?.id;
@@ -248,19 +300,16 @@ router.get('/feedback', authMiddleware, async (req: AuthRequest, res) => {
 
     const attemptRepository = AppDataSource.getRepository(EvaluationAttempt);
     
-    let whereClause: any = { userId };
+    // Construir query builder optimizado
+    const queryBuilder = attemptRepository
+      .createQueryBuilder('attempt')
+      .leftJoinAndSelect('attempt.stage', 'stage')
+      .where('attempt.userId = :userId', { userId });
+
     if (stageId) {
-      whereClause.stageId = parseInt(stageId as string);
+      queryBuilder.andWhere('attempt.stageId = :stageId', { stageId: parseInt(stageId as string) });
     }
 
-    const attempts = await attemptRepository.find({
-      where: whereClause,
-      relations: ['stage'],
-      order: { createdAt: 'DESC' }
-    });
-
-    // Apply time filter
-    let filteredAttempts = attempts;
     if (timeFilter !== 'all') {
       const filterDate = new Date();
       switch (timeFilter) {
@@ -277,14 +326,16 @@ router.get('/feedback', authMiddleware, async (req: AuthRequest, res) => {
           filterDate.setFullYear(filterDate.getFullYear() - 1);
           break;
       }
-      filteredAttempts = attempts.filter(attempt => 
-        new Date(attempt.createdAt) >= filterDate
-      );
+      queryBuilder.andWhere('attempt.createdAt >= :filterDate', { filterDate });
     }
 
-    // Calculate metrics for AI feedback
+    queryBuilder.orderBy('attempt.createdAt', 'DESC');
+
+    const attempts = await queryBuilder.getMany();
+
+    // Calcular métricas optimizadas para AI feedback
     const stageMetricsMap = new Map();
-    for (const attempt of filteredAttempts) {
+    for (const attempt of attempts) {
       const stageId = attempt.stageId;
       if (!stageMetricsMap.has(stageId)) {
         stageMetricsMap.set(stageId, {
@@ -315,13 +366,23 @@ router.get('/feedback', authMiddleware, async (req: AuthRequest, res) => {
     }));
 
     const overallMetrics = {
-      totalAttempts: filteredAttempts.length,
-      averageScore: filteredAttempts.length > 0 ? 
-        filteredAttempts.reduce((sum, attempt) => sum + (attempt.score || 0), 0) / filteredAttempts.length : 0,
-      totalTimeSpent: filteredAttempts.reduce((sum, attempt) => sum + (attempt.timeSpentSeconds || 0), 0)
+      totalAttempts: attempts.length,
+      averageScore: attempts.length > 0 ? 
+        attempts.reduce((sum, attempt) => sum + (attempt.score || 0), 0) / attempts.length : 0,
+      totalTimeSpent: attempts.reduce((sum, attempt) => sum + (attempt.timeSpentSeconds || 0), 0)
     };
 
-    const aiFeedback = await generateAIFeedback(filteredAttempts, stageMetrics, overallMetrics);
+    // Usar cache para AI feedback
+    const cacheKey = `feedback-${userId}-${timeFilter}-${stageId || 'all'}`;
+    const cachedFeedback = aiFeedbackCache.get(cacheKey);
+    
+    let aiFeedback;
+    if (cachedFeedback && (Date.now() - cachedFeedback.timestamp) < CACHE_TTL) {
+      aiFeedback = cachedFeedback.feedback;
+    } else {
+      aiFeedback = await generateAIFeedback(attempts, stageMetrics, overallMetrics);
+      aiFeedbackCache.set(cacheKey, { feedback: aiFeedback, timestamp: Date.now() });
+    }
 
     res.json(aiFeedback);
 
@@ -380,9 +441,6 @@ Responde en español de manera motivacional pero honesta, usando los datos reale
     ];
     
     const response = await openRouterService.getInstance().generateCompletion(messages);
-    
-    console.log('AI Response type:', typeof response);
-    console.log('AI Response:', response);
     
     // Parse the AI response and structure it
     const feedbackText = response; // response is already a string from generateCompletion

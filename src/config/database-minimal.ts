@@ -2,7 +2,10 @@ import { DataSource } from 'typeorm';
 import { User } from '../entities/User';
 import { Stage } from '../entities/Stage';
 import { Question } from '../entities/Question';
+import { UserStage } from '../entities/UserStage';
 import { EvaluationAttempt } from '../entities/EvaluationAttempt';
+import { UserResponse } from '../entities/UserResponse';
+import { Feedback } from '../entities/Feedback';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -21,7 +24,7 @@ const sslConfig = shouldUseSSL ? {
   rejectUnauthorized: false, // For development only, in production use proper certificates
 } : false;
 
-// Create a new DataSource instance with simplified configuration
+// Create a new DataSource instance with all necessary entities
 const createDataSource = () => {
   try {
     return new DataSource({
@@ -32,9 +35,12 @@ const createDataSource = () => {
       logging: false, // Disable all database query logging
       entities: [
         User, 
-        Stage, 
-        Question, 
-        EvaluationAttempt
+        Stage,
+        Question,
+        UserStage,
+        EvaluationAttempt,
+        UserResponse,
+        Feedback
       ],
       extra: shouldUseSSL ? {
         ssl: sslConfig
@@ -61,4 +67,4 @@ export const getDataSource = async () => {
     }
   }
   return AppDataSource;
-};
+}; 

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { AppDataSource } from '../config/database';
+import { AppDataSource } from '../config/database-minimal';
 import { Feedback } from '../entities/Feedback';
 import { EvaluationAttempt } from '../entities/EvaluationAttempt';
 import { UserResponse } from '../entities/UserResponse';
@@ -29,12 +29,7 @@ router.post('/attempts', authMiddleware, async (req: AuthRequest, res) => {
       return res.status(403).json({ success: false, error: 'User ID mismatch' });
     }
 
-    console.log('Request body:', { attemptId, userId, stageId, responses, timeSpent });
-    console.log('User ID from payload:', userId);
-    console.log('User ID from token:', req.user.id);
-    console.log('Type of user ID:', typeof userId);
-    console.log('Stage ID from payload:', stageId);
-    console.log('Type of stage ID:', typeof stageId);
+    
     
     // Validate that userId and stageId are valid numbers
     if (!userId || isNaN(Number(userId)) || Number(userId) <= 0) {
@@ -73,7 +68,7 @@ router.post('/attempts', authMiddleware, async (req: AuthRequest, res) => {
 
     // Check if stage has questions first
     const stageQuestions = await questionRepository.find({ where: { stageId } });
-    console.log(`Stage ${stageId} has ${stageQuestions.length} questions available`);
+  
     
     if (stageQuestions.length === 0) {
       await queryRunner.rollbackTransaction();
@@ -86,27 +81,21 @@ router.post('/attempts', authMiddleware, async (req: AuthRequest, res) => {
     // Get all question details at once for better performance
     const questionIds = responses.map((r: any) => Number(r.questionId));
     
-    console.log('Processing feedback with:', {
-      stageId,
-      responsesCount: responses.length,
-      questionIds,
-      validQuestionIds: questionIds.filter((id: number) => id && !isNaN(id)),
-      availableQuestionIds: stageQuestions.map(q => q.id)
-    });
+
     
     // Validate that we have question IDs
     if (!questionIds.length || questionIds.every((id: number) => !id || isNaN(id))) {
       console.error('No valid question IDs provided:', { questionIds, responses });
       await queryRunner.rollbackTransaction();
       return res.status(400).json({ success: false, error: 'No valid question IDs provided' });
-    }
+    } 
     
     const questions = await questionRepository
       .createQueryBuilder('question')
       .where('question.id IN (:...ids)', { ids: questionIds })
       .getMany();
     
-    console.log('Found questions:', questions.length);
+
 
     if (questions.length === 0) {
       await queryRunner.rollbackTransaction();
@@ -126,16 +115,6 @@ router.post('/attempts', authMiddleware, async (req: AuthRequest, res) => {
     }
 
     // Create new attempt
-    console.log('Creating attempt with:', {
-      attemptId,
-      userId,
-      stageId,
-      startTime: new Date(Date.now() - (timeSpent * 1000)),
-      endTime: new Date(),
-      timeSpentSeconds: timeSpent,
-      isCompleted: true,
-      score: 0
-    });
 
     const attempt = attemptRepository.create({
       attemptId,
@@ -147,14 +126,14 @@ router.post('/attempts', authMiddleware, async (req: AuthRequest, res) => {
       isCompleted: true,
       score: 0
     });
-    console.log('Attempt before save:', attempt);
+
 
     // Save attempt with error handling
     const savedAttempt = await attemptRepository.save(attempt).catch(err => {
       console.error('Failed to save attempt:', err);
       throw new Error(`Failed to save evaluation attempt: ${err.message}`);
     });
-    console.log('Saved attempt:', savedAttempt);
+
 
     // Verify attempt was saved
     if (!savedAttempt.id) {
@@ -182,11 +161,7 @@ router.post('/attempts', authMiddleware, async (req: AuthRequest, res) => {
         // Compare with the correct answer
         isCorrect = question.correctAnswer === userSelectedOption;
         
-        console.log(`Multiple choice evaluation for question ${question.id}:`);
-        console.log(`  User answer index: ${response.answer}`);
-        console.log(`  User selected option: ${userSelectedOption}`);
-        console.log(`  Correct answer: ${question.correctAnswer}`);
-        console.log(`  Is correct: ${isCorrect}`);
+
       } else {
         // For open questions, evaluate with AI
         try {
@@ -197,7 +172,7 @@ router.post('/attempts', authMiddleware, async (req: AuthRequest, res) => {
             question.difficulty || 'intermediate'
           );
           isCorrect = aiEvaluation.isCorrect;
-          console.log(`AI evaluation for question ${question.id}: ${isCorrect ? 'Correct' : 'Incorrect'}`);
+  
         } catch (error) {
           console.error('Error evaluating open question with AI:', error);
           // Fallback: mark as incorrect if AI evaluation fails
@@ -222,7 +197,7 @@ router.post('/attempts', authMiddleware, async (req: AuthRequest, res) => {
         console.error('Failed to save user response:', err);
         throw new Error(`Failed to save user response: ${err.message}`);
       });
-      console.log('Saved user response:', savedResponse);
+
       savedResponses.push(savedResponse);
       
       userResponsesWithDetails.push({
@@ -267,7 +242,7 @@ router.post('/attempts', authMiddleware, async (req: AuthRequest, res) => {
       console.error('Failed to save feedback:', err);
       throw new Error(`Failed to save feedback: ${err.message}`);
     });
-    console.log('Saved feedback:', savedFeedback);
+
 
     // Update attempt with final score
     savedAttempt.score = finalScore;
@@ -279,12 +254,7 @@ router.post('/attempts', authMiddleware, async (req: AuthRequest, res) => {
     // Update user stage progress
     const userStageRepository = queryRunner.manager.getRepository(UserStage);
     
-    console.log('About to update user stage progress with:', {
-      userId: Number(userId),
-      stageId: Number(stageId),
-      finalScore,
-      isCompleted: finalScore >= 60
-    });
+
     
     // Check if user has already completed this stage
     let userStage = await userStageRepository.findOne({
@@ -296,13 +266,7 @@ router.post('/attempts', authMiddleware, async (req: AuthRequest, res) => {
       const userIdNum = Number(userId);
       const stageIdNum = Number(stageId);
       
-      console.log('Creating new user stage with:', {
-        userId: userIdNum,
-        stageId: stageIdNum,
-        isCompleted: finalScore >= 60,
-        score: finalScore,
-        completedAt: finalScore >= 60 ? new Date() : null
-      });
+
       
       userStage = userStageRepository.create({
         userId: userIdNum,
@@ -327,13 +291,7 @@ router.post('/attempts', authMiddleware, async (req: AuthRequest, res) => {
       throw new Error(`Failed to update user stage progress: ${err.message}`);
     });
 
-    console.log('Updated user stage progress:', {
-      userId: Number(userId),
-      stageId: Number(stageId),
-      isCompleted: userStage.isCompleted,
-      score: userStage.score,
-      completedAt: userStage.completedAt
-    });
+
 
     // Update user's global score and current stage
     const userRepo = queryRunner.manager.getRepository(User);
@@ -365,7 +323,7 @@ router.post('/attempts', authMiddleware, async (req: AuthRequest, res) => {
       }
       
       await userRepo.save(currentUser);
-      console.log('Updated user global score:', currentUser.globalScore);
+
     }
 
     // Commit transaction

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { AppDataSource } from '../config/database';
+import { AppDataSource } from '../config/database-minimal';
 import { Question } from '../entities/Question';
 import { Stage } from '../entities/Stage';
 import { authMiddleware, AuthRequest, adminMiddleware } from '../middleware/auth';

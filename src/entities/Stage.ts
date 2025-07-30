@@ -1,5 +1,5 @@
 import { Entity, PrimaryGeneratedColumn, Column, OneToMany, Repository } from 'typeorm';
-import { AppDataSource } from '../config/database';
+import { AppDataSource } from '../config/database-minimal';
 import { Question } from './Question';
 import { UserStage } from './UserStage';
 import { EvaluationAttempt } from './EvaluationAttempt';
@@ -58,16 +58,16 @@ export class Stage {
   @Column({ type: 'text', nullable: true })
   considerations: string | null = null;
 
-  @Column({ type: 'text', array: true, nullable: true })
+  @Column({ name: 'topics_covered', type: 'text', array: true, nullable: true })
   topicsCovered: string[] | null = null;
 
-  @Column({ type: 'text', nullable: true })
+  @Column({ name: 'what_to_expect', type: 'text', nullable: true })
   whatToExpect: string | null = null;
 
-  @Column({ type: 'text', array: true, nullable: true })
+  @Column({ name: 'tips_for_success', type: 'text', array: true, nullable: true })
   tipsForSuccess: string[] | null = null;
 
-  @Column({ type: 'text', nullable: true })
+  @Column({ name: 'evaluation_description', type: 'text', nullable: true })
   evaluationDescription: string | null = null;
 
   @Column({ name: 'total_questions', type: 'integer', default: 10 })

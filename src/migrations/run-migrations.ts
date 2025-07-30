@@ -5,7 +5,7 @@ async function runMigrations() {
   try {
     // Get initialized data source
     const dataSource = await getDataSource();
-    console.log('Database connected successfully');
+  
 
     // Insert initial stages
     const stageRepository = dataSource.getRepository(Stage);
@@ -76,17 +76,17 @@ async function runMigrations() {
       if (!existingStage) {
         const stage = stageRepository.create(stageData);
         await stageRepository.save(stage);
-        console.log(`Created stage: ${stageData.title}`);
+  
       }
     }
 
-    console.log('Migrations completed successfully');
+
   } catch (error) {
     console.error('Error running migrations:', error);
     process.exit(1);
   } finally {
     // No need to destroy the connection as it's managed by the DataSource singleton
-    console.log('Migrations process completed');
+
   }
 }
 

@@ -22,14 +22,11 @@ class OpenRouterService {
   private constructor() {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) {
-      throw new Error(
-        'OPENROUTER_API_KEY is not defined in your environment variables.\n' +
-        'Please make sure you have a .env file in your project root with the following line:\n' +
-        'OPENROUTER_API_KEY=your_api_key_here\n' +
-        'Current working directory: ' + process.cwd()
-      );
+      console.warn('OPENROUTER_API_KEY is not defined. AI features will be disabled.');
+      this.apiKey = '';
+    } else {
+      this.apiKey = apiKey;
     }
-    this.apiKey = apiKey;
   }
 
   public static getInstance(): OpenRouterService {
@@ -282,13 +279,13 @@ Genera feedback constructivo y personalizado basado en el análisis detallado de
         cleanedResponse = cleanedResponse.replace(/^```\s*/, '').replace(/\s*```$/, '');
       }
       
-      console.log('Cleaned response for parsing:', cleanedResponse);
+      
       
       let parsedResponse;
       try {
         parsedResponse = JSON.parse(cleanedResponse);
       } catch (parseError) {
-        console.log('Initial parse failed, trying to fix control characters...');
+
         
         // Try to fix control characters by replacing them with spaces in string values
         const fixedResponse = cleanedResponse.replace(/"([^"]*?)"/g, (match, content) => {
@@ -301,7 +298,7 @@ Genera feedback constructivo y personalizado basado en el análisis detallado de
           return `"${fixedContent}"`;
         });
         
-        console.log('Fixed response for parsing:', fixedResponse);
+        
         parsedResponse = JSON.parse(fixedResponse);
       }
       

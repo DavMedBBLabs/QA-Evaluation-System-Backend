@@ -1,17 +1,58 @@
 import { Router } from 'express';
-import { AppDataSource } from '../config/database';
+import { AppDataSource } from '../config/database-minimal';
 import { Stage, ICreateStageInput } from '../entities/Stage';
 import { UserStage } from '../entities/UserStage';
+import { Question } from '../entities/Question';
 import { authMiddleware, AuthRequest, adminMiddleware } from '../middleware/auth';
 import { openRouterService } from '../services/openRouterService';
+import { In } from 'typeorm';
 
 const router = Router();
+
+// Background task to generate questions for a stage
+async function generateQuestionsInBackground(stage: Stage): Promise<void> {
+  try {
+    console.log(`🔄 Generando preguntas en segundo plano para stage: ${stage.title}`);
+    
+    const aiResponse = await openRouterService.getInstance().generateQuestions(
+      stage.title,
+      stage.difficulty,
+      stage.openQuestions,
+      stage.closedQuestions,
+      stage.considerations || undefined
+    );
+
+    // Save generated questions to database
+    const questionRepository = AppDataSource.getRepository(Question);
+    const questionsToSave = aiResponse.questions.map((q: any) => ({
+      stageId: stage.id,
+      type: q.type,
+      questionText: q.questionText,
+      options: q.options || null,
+      correctAnswer: q.correctAnswer || null,
+      points: q.points,
+      category: q.category,
+      difficulty: q.difficulty
+    }));
+
+    const savedQuestions = await questionRepository.save(questionsToSave);
+
+    // Update stage question count
+    await AppDataSource.getRepository(Stage).update(stage.id, {
+      questionCount: savedQuestions.length
+    });
+
+    console.log(`✅ ${savedQuestions.length} preguntas generadas exitosamente en segundo plano para stage ${stage.id}`);
+  } catch (error: any) {
+    console.error(`❌ Error generando preguntas en segundo plano para stage ${stage.id}:`, error);
+    throw error;
+  }
+}
 
 // Helper function to determine if a stage is unlocked
 const isStageUnlocked = (stage: any, stages: any[], userStages: any[]): boolean => {
   // Si es el primer stage por displayOrder, siempre está desbloqueado
   if (stage.displayOrder === 1) {
-    console.log(`Stage ${stage.id} (displayOrder: ${stage.displayOrder}): First stage, always unlocked`);
     return true;
   }
   
@@ -27,23 +68,12 @@ const isStageUnlocked = (stage: any, stages: any[], userStages: any[]): boolean 
   const previousUserStage = userStages.find(us => us.stageId === previousStage.id);
   const isUnlocked = previousUserStage?.isCompleted || false;
   
-  // Log para debugging
-  console.log(`Stage ${stage.id} (displayOrder: ${stage.displayOrder}): previous stage ${previousStage.id} (displayOrder: ${previousStage.displayOrder}) completed: ${previousUserStage?.isCompleted}, unlocked: ${isUnlocked}`);
-  
   return isUnlocked;
 };
 
 // Validation function to ensure proper stage unlocking logic
 const validateStageUnlocking = (stages: any[], userStages: any[]): void => {
-  console.log('=== STAGE UNLOCKING VALIDATION ===');
-  console.log(`Total stages: ${stages.length}`);
-  console.log(`User completed stages: ${userStages.filter(us => us.isCompleted).map(us => us.stageId).join(', ')}`);
-  
-  stages.forEach(stage => {
-    const isUnlocked = isStageUnlocked(stage, stages, userStages);
-    console.log(`Stage ${stage.id} (${stage.title}) - displayOrder: ${stage.displayOrder}, unlocked: ${isUnlocked}`);
-  });
-  console.log('=== END VALIDATION ===');
+  // Validation logic without console logs for production
 };
 
 // Get all stages
@@ -122,6 +152,14 @@ router.get('/:id', authMiddleware, async (req: AuthRequest, res) => {
       where: { userId: req.user!.id, stageId }
     });
 
+    console.log('Stage data being sent:', {
+      id: stage.id,
+      title: stage.title,
+      openQuestions: stage.openQuestions,
+      closedQuestions: stage.closedQuestions,
+      totalQuestions: stage.totalQuestions
+    });
+
     res.json({
       ...stage,
       totalQuestions: stage.totalQuestions,
@@ -180,7 +218,10 @@ router.post('/', authMiddleware, adminMiddleware, async (req: AuthRequest, res) 
       estimatedTime,
       displayOrder,
       isActive = true,
-      considerations = null
+      considerations = null,
+      totalQuestions,
+      openQuestions,
+      closedQuestions
     } = req.body;
 
     // Validate required fields
@@ -220,17 +261,25 @@ router.post('/', authMiddleware, adminMiddleware, async (req: AuthRequest, res) 
       topicsCovered: stageDetails.topicsCovered,
       whatToExpect: stageDetails.whatToExpect,
       tipsForSuccess: stageDetails.tipsForSuccess,
-      evaluationDescription: stageDetails.evaluationDescription
+      evaluationDescription: stageDetails.evaluationDescription,
+      totalQuestions: totalQuestions ? parseInt(totalQuestions) : 10,
+      openQuestions: openQuestions ? parseInt(openQuestions) : 5,
+      closedQuestions: closedQuestions ? parseInt(closedQuestions) : 5
     };
 
     // Create the stage using the static method
     const newStage = await Stage.createStage(stageData);
 
+    // Generate questions in background (non-blocking)
+    generateQuestionsInBackground(newStage).catch(error => {
+      console.error(`Error generating questions in background for stage ${newStage.id}:`, error);
+    });
+
     // Return the created stage without sensitive data
     const { id, questionCount } = newStage;
     
     res.status(201).json({
-      message: 'Stage created successfully',
+      message: 'Stage created successfully. Questions will be generated in the background.',
       stage: {
         id,
         title: newStage.title,
@@ -246,7 +295,10 @@ router.post('/', authMiddleware, adminMiddleware, async (req: AuthRequest, res) 
         topicsCovered: newStage.topicsCovered,
         whatToExpect: newStage.whatToExpect,
         tipsForSuccess: newStage.tipsForSuccess,
-        evaluationDescription: newStage.evaluationDescription
+        evaluationDescription: newStage.evaluationDescription,
+        totalQuestions: newStage.totalQuestions,
+        openQuestions: newStage.openQuestions,
+        closedQuestions: newStage.closedQuestions
       }
     });
   } catch (error: unknown) {
@@ -410,6 +462,52 @@ router.get('/debug/stage16', authMiddleware, async (req: AuthRequest, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch stage 16 debug info' });
+  }
+});
+
+// Get stage questions status (Admin only)
+router.get('/:id/questions-status', authMiddleware, adminMiddleware, async (req: AuthRequest, res) => {
+  try {
+    const stageId = parseInt(req.params.id);
+    const stageRepository = AppDataSource.getRepository(Stage);
+    const questionRepository = AppDataSource.getRepository(Question);
+
+    const stage = await stageRepository.findOne({ where: { id: stageId } });
+    if (!stage) {
+      return res.status(404).json({ error: 'Stage not found' });
+    }
+
+    // Count questions for this stage
+    const questionCount = await questionRepository.count({ where: { stageId } });
+
+    // Get question types distribution - check multiple possible type values
+    const openQuestions = await questionRepository.count({ 
+      where: { 
+        stageId, 
+        type: In(['open_text', 'open-text', 'text']) 
+      } 
+    });
+    const closedQuestions = await questionRepository.count({ 
+      where: { 
+        stageId, 
+        type: In(['multiple_choice', 'multiple-choice', 'choice']) 
+      } 
+    });
+
+    res.json({
+      stageId,
+      stageTitle: stage.title,
+      totalQuestions: questionCount,
+      openQuestions,
+      closedQuestions,
+      expectedOpen: stage.openQuestions,
+      expectedClosed: stage.closedQuestions,
+      hasQuestions: questionCount > 0,
+      isComplete: questionCount >= (stage.openQuestions + stage.closedQuestions)
+    });
+  } catch (error) {
+    console.error('Error getting stage questions status:', error);
+    res.status(500).json({ error: 'Failed to get questions status' });
   }
 });
 

@@ -1,13 +1,9 @@
-// Load environment variables first
-import dotenv from 'dotenv';
-dotenv.config({ path: process.env.NODE_ENV === 'production' ? undefined : '.env' });
-
 import 'reflect-metadata';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
-import { AppDataSource, getDataSource } from './config/database';
+import { AppDataSource, getDataSource } from './config/database-minimal';
 import { errorHandler } from './middleware/errorHandler';
 import { requestLogger } from './middleware/requestLogger';
 import authRoutes from './routes/auth';
@@ -59,24 +55,21 @@ app.use(errorHandler);
 // Initialize database connection and start server
 const startServer = async () => {
   try {
-    // Initialize database connection
-    const dataSource = await getDataSource();
-    console.log('Database connected successfully');
-
-    // Run migrations in development
-    if (process.env.NODE_ENV === 'development') {
-      await dataSource.runMigrations();
-      console.log('Migrations run successfully');
+    // Solo conectar a la base de datos si está definida
+    if (process.env.DATABASE_URL) {
+      const dataSource = await getDataSource();
+      console.log('✅ Database connection ready');
+    } else {
+      console.warn('⚠️ DATABASE_URL not set. Skipping database initialization.');
     }
 
-    // Start the server
+    // Iniciar el servidor
     app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
-      console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`CORS Origin: ${process.env.CORS_ORIGIN || 'http://localhost:8080'}`);
+      console.log(`🚀 Server running on port ${PORT}`);
+      console.log(`📊 Health check available at http://localhost:${PORT}/health`);
     });
   } catch (error) {
-    console.error('Failed to start server:', error);
+    console.error('❌ Failed to start server:', error);
     process.exit(1);
   }
 };
